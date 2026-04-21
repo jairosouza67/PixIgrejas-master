@@ -1,0 +1,5 @@
+{
+  "name": "CCB - Gestão Financeira",
+  "description": "Sistema de gestão financeira para a Congregação Cristã no Brasil - Administração Vitória da Conquista. Processamento de extratos e integração com Google Sheets.",
+  "requestFramePermissions": []
+}
