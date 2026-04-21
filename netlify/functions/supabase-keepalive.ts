@@ -6,11 +6,11 @@ export const config = {
   schedule,
 };
 
-const jsonResponse = (body: unknown, status: number) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
+const jsonResponse = (body: unknown, statusCode: number) => ({
+  statusCode,
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(body),
+});
 
 const runKeepalive = async () => {
   // Accept both backend-style and Vite-style env names to avoid deploy mismatches.
