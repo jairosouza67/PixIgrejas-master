@@ -6,20 +6,29 @@ export const config = {
   schedule,
 };
 
-export default async () => {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const jsonResponse = (body: unknown, status: number) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+
+const runKeepalive = async () => {
+  // Accept both backend-style and Vite-style env names to avoid deploy mismatches.
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const supabaseKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: 'Missing SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).',
-      }),
+    return jsonResponse(
       {
-        status: 500,
-        headers: { 'content-type': 'application/json' },
+        ok: false,
+        error:
+          'Missing Supabase env vars. Set SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY), or VITE_SUPABASE_URL/VITE_SUPABASE_ANON_KEY.',
       },
+      500,
     );
   }
 
@@ -33,28 +42,22 @@ export default async () => {
     .select('id', { head: true, count: 'exact' });
 
   if (error) {
-    return new Response(
-      JSON.stringify({ ok: false, error: error.message }),
-      {
-        status: 500,
-        headers: { 'content-type': 'application/json' },
-      },
-    );
+    return jsonResponse({ ok: false, error: error.message }, 500);
   }
 
-  return new Response(
-    JSON.stringify({
+  return jsonResponse(
+    {
       ok: true,
       message: 'Supabase keepalive executed successfully.',
       table: 'churches',
       rows: count ?? 0,
       timestamp: new Date().toISOString(),
       schedule,
-    }),
-    {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
     },
+    200,
   );
 };
+
+export const handler = runKeepalive;
+export default runKeepalive;
 
