@@ -469,6 +469,38 @@ const parseAmount = (amountStr: string | number): number | null => {
   return !isNaN(amount) && amount > 0 ? amount : null;
 };
 
+const splitCsvLine = (line: string, separator: string): string[] => {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    const nextChar = line[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === separator && !inQuotes) {
+      fields.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  fields.push(current.trim());
+  return fields.map(field => field.replace(/^"|"$/g, '').trim());
+};
+
 export const fileParserService = {
   async parseCSV(content: string): Promise<ParsedTransaction[]> {
     console.log('Parsing CSV...');
@@ -490,7 +522,7 @@ export const fileParserService = {
     console.log('CSV separator:', separator === '\t' ? 'TAB' : separator);
 
     // Parse header to find columns
-    const headers = firstLine.split(separator).map(h => h.trim().toLowerCase().replace(/"/g, ''));
+    const headers = splitCsvLine(firstLine, separator).map(h => h.toLowerCase());
     console.log('CSV headers:', headers);
     
     // Find column indexes - support Caixa PIX format
@@ -520,7 +552,7 @@ export const fileParserService = {
         continue;
       }
 
-      const parts = line.split(separator).map(p => p.trim().replace(/"/g, ''));
+      const parts = splitCsvLine(line, separator);
       
       // Skip if not enough columns
       if (parts.length < 3) continue;
