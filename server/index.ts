@@ -72,8 +72,6 @@ const syncToGoogleSheets = async (churchId: number, transactions: any[]) => {
   if (!church || !church.googleSheetId) return;
 
   // Implementation would use google.sheets('v4').spreadsheets.values.append
-  console.log(`Syncing ${transactions.length} rows to Sheet ${church.googleSheetId}`);
-  
   // Update status in DB
   await prisma.transaction.updateMany({
     where: { id: { in: transactions.map(t => t.id) } },
@@ -167,7 +165,6 @@ app.post('/extract/upload', authenticate, requireAdmin, upload.single('file'), a
     res.json({ message: 'File processed', processed: processedCount });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Processing failed' });
   }
 });
@@ -201,5 +198,4 @@ app.get('/church/me/transactions', authenticate, async (req: any, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
 });

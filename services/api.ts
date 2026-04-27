@@ -163,10 +163,7 @@ export const churchService = {
       .from('churches')
       .select('*', { count: 'exact', head: true });
 
-    if (count && count > 0) {
-      console.log('Churches already seeded');
-      return;
-    }
+    if (count && count > 0) return;
 
     // Insert all churches from the mapping
     const churches = Object.entries(CHURCH_MAPPING).map(([cents, name]) => ({
@@ -176,7 +173,6 @@ export const churchService = {
 
     const { error } = await supabase.from('churches').insert(churches);
     if (error) throw error;
-    console.log('Churches seeded successfully');
   },
 
   async updateGoogleSheetId(churchId: number, sheetId: string) {
@@ -268,8 +264,6 @@ export const transactionService = {
       .from('transactions')
       .select('id', { count: 'exact', head: true });
 
-    console.log(`🔍 Found ${beforeCount || 0} transactions to delete`);
-
     // Delete all transactions using gte (greater than or equal to) on a timestamp
     // This will match all rows
     const { error, count: deletedCount } = await supabase
@@ -277,12 +271,7 @@ export const transactionService = {
       .delete({ count: 'exact' })
       .gte('created_at', '1970-01-01'); // Match all records (any date >= 1970)
 
-    if (error) {
-      console.error('❌ Delete error:', error);
-      throw error;
-    }
-
-    console.log(`🗑️ Deleted ${deletedCount || beforeCount || 0} transactions`);
+    if (error) throw error;
     return deletedCount || beforeCount || 0;
   }
 };
@@ -300,8 +289,6 @@ export const statsService = {
     if (error) throw error;
     const totalAmount = transactions?.reduce((acc, tx) => acc + tx.amount, 0) || 0;
     const totalTransactions = transactions?.length || 0;
-
-    console.log('📊 getDashboardStats -> totalTransactions:', totalTransactions, 'totalAmount:', totalAmount);
 
     // Calculate daily volume (last 7 days)
     const dailyVolume = transactions?.reduce((acc: { date: string; amount: number }[], tx) => {
@@ -375,30 +362,24 @@ const identifyChurchId = async (amount: number): Promise<number> => {
   const parts = amountStr.split('.');
   const cents = parseInt(parts[1] || '0', 10);
   
-  console.log(`🔍 Identifying church: amount=${amount}, amountStr=${amountStr}, cents=${cents}`);
-  
   try {
     const churchMap = await getChurchIdMap();
     
     // Look up the database ID for this cents_code
     if (churchMap.has(cents)) {
       const dbId = churchMap.get(cents)!;
-      console.log(`✅ Identified church: cents=${cents}, db_id=${dbId}`);
       return dbId;
     }
     
     // If not found, use default church (cents_code = 0 = "Não identificado")
     if (churchMap.has(0)) {
       const defaultId = churchMap.get(0)!;
-      console.warn(`⚠️ Church not found for cents=${cents}, using default (id=${defaultId})`);
       return defaultId;
     }
     
     // Fallback if even default doesn't exist (shouldn't happen)
-    console.error(`❌ Cannot identify church: cents=${cents}, no church map available`);
     return 1; // Fallback to first church
   } catch (error) {
-    console.error(`❌ Error identifying church for amount ${amount}:`, error);
     return 1; // Fallback to first church on error
   }
 };
@@ -503,12 +484,10 @@ const splitCsvLine = (line: string, separator: string): string[] => {
 
 export const fileParserService = {
   async parseCSV(content: string): Promise<ParsedTransaction[]> {
-    console.log('Parsing CSV...');
     const lines = content.trim().split(/\r?\n/);
     const transactions: ParsedTransaction[] = [];
 
     if (lines.length < 2) {
-      console.log('CSV has less than 2 lines');
       return transactions;
     }
 
@@ -519,11 +498,9 @@ export const fileParserService = {
     if (!firstLine.includes('\t')) {
       separator = firstLine.includes(';') ? ';' : ',';
     }
-    console.log('CSV separator:', separator === '\t' ? 'TAB' : separator);
 
     // Parse header to find columns
     const headers = splitCsvLine(firstLine, separator).map(h => h.toLowerCase());
-    console.log('CSV headers:', headers);
     
     // Find column indexes - support Caixa PIX format
     const dateIdx = headers.findIndex(h => 
@@ -539,8 +516,6 @@ export const fileParserService = {
     const tipoPixIdx = headers.findIndex(h => 
       h.includes('tipo') && h.includes('pix')
     );
-    
-    console.log('Column indexes - date:', dateIdx, 'desc:', descIdx, 'amount:', amountIdx, 'tipoPix:', tipoPixIdx);
 
     // Parse data rows
     for (let i = 1; i < lines.length; i++) {
@@ -562,7 +537,6 @@ export const fileParserService = {
       if (tipoPixIdx >= 0) {
         const tipoPix = parts[tipoPixIdx]?.toUpperCase() || '';
         if (tipoPix === 'ENVIADO') {
-          console.log('⏭️ Skipping sent transaction (ENVIADO):', tipoPix);
           continue;
         }
       }
@@ -579,24 +553,18 @@ export const fileParserService = {
       if (date && amount && amount > 0) {
         const description = buildSafeDescription(rawDescription);
         transactions.push({ date, amount, description });
-        console.log('✅ Parsed CSV transaction:', { date: date.toISOString(), amount });
-      } else {
-        console.log('⏭️ Skipped invalid transaction:', { dateStr, amountStr, amount });
       }
     }
 
-    console.log('Total CSV transactions parsed:', transactions.length);
     return transactions;
   },
 
   async parseXLSX(buffer: ArrayBuffer): Promise<ParsedTransaction[]> {
-    console.log('Parsing XLSX...');
     const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
     
     // Get raw data first to see what we have
     const rawData = XLSX.utils.sheet_to_json<any>(firstSheet, { header: 1 });
-    console.log('XLSX total rows (raw):', rawData.length);
     
     // Find the header row (look for "Data" column)
     let headerRowIdx = 0;
@@ -607,7 +575,6 @@ export const fileParserService = {
         return cellStr === 'data' || cellStr.includes('data');
       })) {
         headerRowIdx = i;
-        console.log('Found header row at index:', i);
         break;
       }
     }
@@ -618,12 +585,6 @@ export const fileParserService = {
       raw: false, 
       dateNF: 'dd/mm/yyyy' 
     });
-    
-    console.log('XLSX data rows:', data.length);
-    if (data.length > 0) {
-      console.log('First row:', data[0]);
-      console.log('First row keys:', Object.keys(data[0]));
-    }
 
     const transactions: ParsedTransaction[] = [];
 
@@ -668,7 +629,6 @@ export const fileParserService = {
       
       // Skip only if explicitly marked as "ENVIADO" (sent), not all non-RECEBIDO
       if (tipoPix === 'ENVIADO') {
-        console.log('⏭️ Skipping sent transaction (ENVIADO)');
         continue;
       }
       
@@ -698,18 +658,13 @@ export const fileParserService = {
           amount,
           description,
         });
-        console.log('✅ Parsed XLSX transaction:', { date: date.toISOString(), amount });
-      } else {
-        console.log('⏭️ Skipped invalid XLSX transaction:', { dateValue, amountValue, amount });
       }
     }
 
-    console.log('Total XLSX transactions parsed:', transactions.length);
     return transactions;
   },
 
   async parseOFX(content: string): Promise<ParsedTransaction[]> {
-    console.log('Parsing OFX...');
     const transactions: ParsedTransaction[] = [];
     
     // Handle both XML-style and SGML-style OFX
@@ -725,8 +680,6 @@ export const fileParserService = {
       const memo = trn.match(/<MEMO>([^<\r\n]*)/)?.[1]?.trim() || '';
       const name = trn.match(/<NAME>([^<\r\n]*)/)?.[1]?.trim() || '';
       const trnType = trn.match(/<TRNTYPE>([^<\r\n]*)/)?.[1]?.trim() || '';
-
-      console.log('OFX transaction candidate:', { dtPosted, trnAmt, memo, name, trnType });
 
       if (dtPosted && trnAmt) {
         const year = parseInt(dtPosted.substring(0, 4));
@@ -744,44 +697,33 @@ export const fileParserService = {
             amount,
             description,
           });
-          console.log('✅ Parsed OFX transaction:', { date: date.toISOString(), amount });
-        } else {
-          console.log('⏭️ Skipped OFX transaction (invalid):', { amount });
         }
       }
     }
 
-    console.log('Total OFX transactions parsed:', transactions.length);
     return transactions;
   },
 
   async processFile(file: File, userId: string): Promise<{ processed: number; duplicates: number; totalAmount: number }> {
-    console.log('📄 Processing file:', file.name, 'Size:', (file.size / 1024).toFixed(1), 'KB');
-    
     let parsedTransactions: ParsedTransaction[] = [];
     const filename = file.name.toLowerCase();
 
     try {
       if (filename.endsWith('.csv') || filename.endsWith('.txt')) {
         const content = await file.text();
-        console.log('File content preview (first 500 chars):', content.substring(0, 500));
         parsedTransactions = await this.parseCSV(content);
       } else if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
         const buffer = await file.arrayBuffer();
         parsedTransactions = await this.parseXLSX(buffer);
       } else if (filename.endsWith('.ofx') || filename.endsWith('.qfx')) {
         const content = await file.text();
-        console.log('File content preview (first 500 chars):', content.substring(0, 500));
         parsedTransactions = await this.parseOFX(content);
       } else {
         throw new Error('Formato de arquivo não suportado. Use CSV, XLSX, XLS, OFX ou QFX.');
       }
     } catch (e: any) {
-      console.error('❌ Error parsing file:', e);
       throw new Error(`Erro ao processar arquivo: ${e.message}`);
     }
-
-    console.log(`✅ Total transactions parsed from file: ${parsedTransactions.length}`);
 
     if (parsedTransactions.length === 0) {
       throw new Error('Nenhuma transação válida encontrada no arquivo. Verifique se o arquivo contém transações com data, descrição e valor positivo.');
@@ -802,7 +744,6 @@ export const fileParserService = {
       .single();
 
     if (logError) {
-      console.warn('⚠️ Could not create upload log (non-fatal):', logError.message);
     } else {
       uploadLog = uploadLogData;
     }
@@ -842,13 +783,6 @@ export const fileParserService = {
         status: 'PENDING',
       });
     }
-
-    console.log('📦 Prepared for insert:', {
-      parsed: parsedTransactions.length,
-      toInsert: transactionsToInsert.length,
-      duplicates,
-      totalAmount,
-    });
 
     // Bulk insert transactions
     if (transactionsToInsert.length > 0) {

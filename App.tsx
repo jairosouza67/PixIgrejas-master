@@ -194,7 +194,6 @@ const Dashboard: React.FC = () => {
         <ResetDataButton
           onReset={async () => {
             const newStats = await api.getStats();
-            console.log('📊 Stats after reset:', newStats);
 
             // Fallback de segurança: se vier null/undefined, zera manualmente
             if (!newStats) {
@@ -227,7 +226,6 @@ const ResetDataButton: React.FC<{ onReset: () => Promise<void> }> = ({ onReset }
     setLoading(true);
     try {
       const deleted = await api.resetTransactions();
-      console.log(`✅ Deleted ${deleted} transactions`);
       setShowConfirm(false);
       
       // Wait a moment for database to settle, then refresh stats
@@ -236,7 +234,6 @@ const ResetDataButton: React.FC<{ onReset: () => Promise<void> }> = ({ onReset }
       
       alert(`✅ ${deleted} transações foram removidas. Você pode fazer um novo upload agora.`);
     } catch (error: any) {
-      console.error('Reset error:', error);
       alert(`❌ Erro ao limpar dados: ${error.message}`);
     } finally {
       setLoading(false);
@@ -542,14 +539,12 @@ export default function App() {
           setCurrentPath(u.role === UserRole.ADMIN ? '/admin/dashboard' : '/me/transactions');
         }
       } catch (error: any) {
-        console.error('Initialization error:', error);
         setInitError(error?.message || 'Erro ao inicializar o sistema');
       } finally {
         // Load church ID map after initialization
         try {
           await getChurchIdMap();
         } catch (mapError) {
-          console.error('Failed to load church map:', mapError);
         }
         setIsInitializing(false);
       }
@@ -605,7 +600,6 @@ export default function App() {
     try {
       await api.logout();
     } catch (e) {
-      console.error('Logout error:', e);
     }
     setUser(null);
     localStorage.removeItem('ccb_user');
