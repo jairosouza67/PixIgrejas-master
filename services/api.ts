@@ -482,6 +482,40 @@ const splitCsvLine = (line: string, separator: string): string[] => {
   return fields.map(field => field.replace(/^"|"$/g, '').trim());
 };
 
+const uploadParsedTransactionsViaNetlify = async (
+  filename: string,
+  userId: string,
+  transactions: ParsedTransaction[]
+): Promise<{ processed: number; duplicates: number; totalAmount: number } | null> => {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const accessToken = sessionData.session?.access_token;
+
+  if (!accessToken) {
+    return null;
+  }
+
+  const response = await fetch('/.netlify/functions/upload-extrato', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      filename,
+      userId,
+      transactions,
+    }),
+  });
+
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Falha ao enviar o extrato para o processamento online');
+  }
+
+  return payload as { processed: number; duplicates: number; totalAmount: number };
+};
+
 export const fileParserService = {
   async parseCSV(content: string): Promise<ParsedTransaction[]> {
     const lines = content.trim().split(/\r?\n/);
@@ -727,6 +761,11 @@ export const fileParserService = {
 
     if (parsedTransactions.length === 0) {
       throw new Error('Nenhuma transação válida encontrada no arquivo. Verifique se o arquivo contém transações com data, descrição e valor positivo.');
+    }
+
+    const remoteResult = await uploadParsedTransactionsViaNetlify(file.name, userId, parsedTransactions);
+    if (remoteResult) {
+      return remoteResult;
     }
 
     // Create upload log (non-fatal: log warning and continue if this fails,
