@@ -34,6 +34,26 @@ export interface DashboardStats {
   dailyVolume: { date: string; amount: number }[];
 }
 
+export interface MonthlyStat {
+  year: number;
+  month: number; // 1-12
+  churchId: number;
+  totalAmount: number;
+  transactionCount: number;
+}
+
+export interface MonthlyEvolutionPoint {
+  key: string;   // ex: "2025-11"
+  label: string; // ex: "11/2025"
+  amount: number;
+  count: number;
+}
+
+export interface ChurchWithData {
+  id: number;
+  name: string;
+}
+
 export interface AuthResponse {
   user: User;
   token: string;

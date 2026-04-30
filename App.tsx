@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Layout, Logo } from './components/Layout';
-import { User, UserRole, Transaction, DashboardStats } from './types';
+import { User, UserRole, Transaction, DashboardStats, MonthlyEvolutionPoint, ChurchWithData } from './types';
 import { api } from './services/api';
 import { supabase } from './services/supabase';
 import { initializeDatabase, getChurchIdMap } from './services/database';
@@ -186,6 +186,8 @@ const Dashboard: React.FC = () => {
         </div>
       </div>
 
+      <MonthlyEvolutionBox />
+
       <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
         <h4 className="text-lg font-semibold text-slate-800 mb-4">Gerenciamento de Dados</h4>
         <p className="text-sm text-slate-600 mb-4">
@@ -209,6 +211,170 @@ const Dashboard: React.FC = () => {
           }}
         />
       </div>
+    </div>
+  );
+};
+
+const MonthlyEvolutionBox: React.FC = () => {
+  // Usa o nome como chave de seleção (consolida igrejas duplicadas como Central que têm múltiplos cents_code).
+  const [selectedChurchName, setSelectedChurchName] = useState<string>('');
+  const [data, setData] = useState<MonthlyEvolutionPoint[]>([]);
+  const [churches, setChurches] = useState<ChurchWithData[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Agrupa igrejas por nome (consolida Centrais e qualquer outro caso de nome repetido).
+  const churchGroups = React.useMemo(() => {
+    const groups = new Map<string, number[]>();
+    churches.forEach((c) => {
+      const arr = groups.get(c.name);
+      if (arr) arr.push(c.id);
+      else groups.set(c.name, [c.id]);
+    });
+    return Array.from(groups.entries())
+      .map(([name, ids]) => ({ name, ids }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [churches]);
+
+  // Resolve os IDs correspondentes ao nome selecionado.
+  const selectedIds = React.useMemo<number[] | undefined>(() => {
+    if (!selectedChurchName) return undefined;
+    const grp = churchGroups.find((g) => g.name === selectedChurchName);
+    return grp ? grp.ids : undefined;
+  }, [selectedChurchName, churchGroups]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [evolution, churchList] = await Promise.all([
+          api.getMonthlyEvolution(undefined),
+          api.getChurchesWithMonthlyData(),
+        ]);
+        if (cancelled) return;
+        setData(evolution);
+        setChurches(churchList);
+      } catch (err) {
+        if (!cancelled) {
+          setData([]);
+          setChurches([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const evolution = await api.getMonthlyEvolution(selectedIds);
+        if (!cancelled) setData(evolution);
+      } catch (err) {
+        if (!cancelled) setData([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedIds]);
+
+  // Determina o ano-base a exibir: maior ano presente nos dados, ou ano atual.
+  const displayYear = React.useMemo(() => {
+    if (data.length === 0) return new Date().getFullYear();
+    return data.reduce((max, p) => {
+      const y = Number(p.key.split('-')[0]);
+      return y > max ? y : max;
+    }, 0);
+  }, [data]);
+
+  // Preenche os 12 meses do ano selecionado, zerando os meses sem dados.
+  const chartData = React.useMemo<MonthlyEvolutionPoint[]>(() => {
+    const byKey = new Map<string, MonthlyEvolutionPoint>();
+    data.forEach((p) => byKey.set(p.key, p));
+    const result: MonthlyEvolutionPoint[] = [];
+    for (let m = 1; m <= 12; m++) {
+      const mm = String(m).padStart(2, '0');
+      const key = `${displayYear}-${mm}`;
+      const existing = byKey.get(key);
+      result.push(
+        existing ?? {
+          key,
+          label: `${mm}/${displayYear}`,
+          amount: 0,
+          count: 0,
+        }
+      );
+    }
+    return result;
+  }, [data, displayYear]);
+
+  const totalPeriodo = chartData.reduce((acc, p) => acc + p.amount, 0);
+  const mesesComDados = chartData.filter((p) => p.amount > 0).length;
+
+  return (
+    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+        <div>
+          <h4 className="text-lg font-semibold text-slate-800">Evolução Mensal <span className="text-sm font-normal text-slate-500">({displayYear})</span></h4>
+          <p className="text-xs text-slate-500 mt-1">
+            Valores acumulados por mês. O histórico é preservado mesmo após limpar as transações.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-500 font-medium">Igreja:</label>
+          <select
+            value={selectedChurchName}
+            onChange={(e) => setSelectedChurchName(e.target.value)}
+            className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-1 focus:ring-blue-500 outline-none bg-white min-w-[200px]"
+          >
+            <option value="">Todas as Igrejas</option>
+            {churchGroups.map((g) => (
+              <option key={g.name} value={g.name}>{g.name}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center" style={{ height: 280 }}>
+          <LucideLoader2 className="animate-spin text-blue-600" size={28} />
+        </div>
+      ) : (
+        <>
+          <div style={{ width: '100%', height: 300, minWidth: 0 }}>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={200}>
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <XAxis dataKey="label" tick={{ fontSize: 12 }} stroke="#94a3b8" interval={0} />
+                <YAxis
+                  tick={{ fontSize: 12 }}
+                  stroke="#94a3b8"
+                  tickFormatter={(v) => `R$${Number(v).toLocaleString('pt-BR')}`}
+                />
+                <Tooltip
+                  formatter={(value: number) => [
+                    `R$ ${Number(value).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`,
+                    'Valor',
+                  ]}
+                  cursor={{ fill: '#f1f5f9' }}
+                />
+                <Bar dataKey="amount" fill="#10b981" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="mt-4 pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
+            <span className="text-slate-500">
+              {mesesComDados} {mesesComDados === 1 ? 'mês' : 'meses'} com dados em {displayYear}
+            </span>
+            <span className="text-slate-700 font-medium">
+              Total no período: <strong className="text-slate-900">R$ {totalPeriodo.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong>
+            </span>
+          </div>
+        </>
+      )}
     </div>
   );
 };

@@ -1,7 +1,7 @@
 import { supabase, USE_MOCK } from './supabase';
 import { api as mockApi } from './mockService';
 import { CHURCH_MAPPING } from '../constants';
-import { User, UserRole, DashboardStats, Transaction as AppTransaction } from '../types';
+import { User, UserRole, DashboardStats, Transaction as AppTransaction, MonthlyEvolutionPoint, ChurchWithData } from '../types';
 import * as XLSX from 'xlsx';
 import { getChurchIdMap } from './database';
 
@@ -259,6 +259,9 @@ export const transactionService = {
   },
 
   async deleteAll(): Promise<number> {
+    // NOTA: Esta operação apaga APENAS a tabela `transactions`.
+    // A tabela `monthly_stats` (snapshot incremental da evolução mensal)
+    // é preservada intencionalmente para não perder o histórico.
     // Get count before deletion
     const { count: beforeCount } = await supabase
       .from('transactions')
@@ -274,6 +277,215 @@ export const transactionService = {
     if (error) throw error;
     return deletedCount || beforeCount || 0;
   }
+};
+
+// ==================== MONTHLY STATS ====================
+
+export interface MonthlyIncrementItem {
+  year: number;
+  month: number; // 1-12
+  churchId: number;
+  amount: number;
+  count: number;
+}
+
+/**
+ * Agrupa transações (já persistidas) por (ano, mês, igreja),
+ * somando valor e quantidade. Usado para alimentar o snapshot mensal.
+ * Função pura — sem dependência de Supabase — facilita testes.
+ */
+export const groupTransactionsByMonth = (
+  items: { date: string; amount: number; church_id: number }[]
+): MonthlyIncrementItem[] => {
+  const map = new Map<string, MonthlyIncrementItem>();
+
+  for (const tx of items) {
+    if (!tx || !tx.date) continue;
+    const d = new Date(tx.date);
+    if (isNaN(d.getTime())) continue;
+    const amount = Number(tx.amount);
+    if (!Number.isFinite(amount)) continue;
+    const churchId = Number(tx.church_id);
+    if (!Number.isFinite(churchId)) continue;
+
+    const year = d.getUTCFullYear();
+    const month = d.getUTCMonth() + 1;
+    const key = `${year}-${month}-${churchId}`;
+
+    const existing = map.get(key);
+    if (existing) {
+      existing.amount += amount;
+      existing.count += 1;
+    } else {
+      map.set(key, { year, month, churchId, amount, count: 1 });
+    }
+  }
+
+  return Array.from(map.values());
+};
+
+export const monthlyStatsService = {
+  /**
+   * Aplica incremento otimista: lê linhas existentes para as chaves informadas
+   * e executa upsert somando os deltas. Assíncrono e idempotente em relação
+   * ao fluxo de upload (dedupe por hash garante que delta venha só do novo).
+   */
+  async applyIncrement(items: MonthlyIncrementItem[]): Promise<void> {
+    if (!items || items.length === 0) return;
+
+    // Agrupa por chave caso a lista tenha duplicatas
+    const merged = new Map<string, MonthlyIncrementItem>();
+    for (const it of items) {
+      const key = `${it.year}-${it.month}-${it.churchId}`;
+      const cur = merged.get(key);
+      if (cur) {
+        cur.amount += it.amount;
+        cur.count += it.count;
+      } else {
+        merged.set(key, { ...it });
+      }
+    }
+    const deltas = Array.from(merged.values());
+
+    // Busca linhas existentes para somar corretamente
+    const existingByKey = new Map<string, { total_amount: number; transaction_count: number }>();
+    for (const d of deltas) {
+      const { data, error } = await supabase
+        .from('monthly_stats')
+        .select('total_amount, transaction_count')
+        .eq('year', d.year)
+        .eq('month', d.month)
+        .eq('church_id', d.churchId)
+        .maybeSingle();
+      if (error) throw error;
+      if (data) {
+        existingByKey.set(`${d.year}-${d.month}-${d.churchId}`, {
+          total_amount: Number(data.total_amount) || 0,
+          transaction_count: Number(data.transaction_count) || 0,
+        });
+      }
+    }
+
+    const rows = deltas.map((d) => {
+      const key = `${d.year}-${d.month}-${d.churchId}`;
+      const existing = existingByKey.get(key);
+      return {
+        year: d.year,
+        month: d.month,
+        church_id: d.churchId,
+        total_amount: (existing?.total_amount ?? 0) + d.amount,
+        transaction_count: (existing?.transaction_count ?? 0) + d.count,
+        updated_at: new Date().toISOString(),
+      };
+    });
+
+    const { error: upsertError } = await supabase
+      .from('monthly_stats')
+      .upsert(rows, { onConflict: 'year,month,church_id' });
+
+    if (upsertError) throw upsertError;
+  },
+
+  async getEvolution(
+    churchIdParam?: number | number[],
+  ): Promise<MonthlyEvolutionPoint[]> {
+    const filterIds: number[] | undefined = Array.isArray(churchIdParam)
+      ? churchIdParam
+      : typeof churchIdParam === 'number'
+        ? [churchIdParam]
+        : undefined;
+
+    const hasFilter = !!(filterIds && filterIds.length > 0);
+
+    // 1) Fonte primária: tabela `transactions` (bate 1:1 com getStats/Dashboard).
+    let txQuery = supabase
+      .from('transactions')
+      .select('date, amount, church_id');
+    if (hasFilter) {
+      txQuery = txQuery.in('church_id', filterIds!);
+    }
+    const { data: txRows, error: txErr } = await txQuery;
+    if (txErr) throw txErr;
+
+    if (txRows && txRows.length > 0) {
+      const bucket = new Map<
+        string,
+        { year: number; month: number; amount: number; count: number }
+      >();
+      for (const row of txRows as any[]) {
+        const d = new Date(row.date);
+        if (isNaN(d.getTime())) continue;
+        const y = d.getUTCFullYear();
+        const m = d.getUTCMonth() + 1;
+        const key = `${y}-${String(m).padStart(2, '0')}`;
+        const amount = Number(row.amount) || 0;
+        const cur = bucket.get(key);
+        if (cur) {
+          cur.amount += amount;
+          cur.count += 1;
+        } else {
+          bucket.set(key, { year: y, month: m, amount, count: 1 });
+        }
+      }
+      return Array.from(bucket.entries())
+        .map(([key, v]) => ({
+          key,
+          label: `${String(v.month).padStart(2, '0')}/${v.year}`,
+          amount: v.amount,
+          count: v.count,
+        }))
+        .sort((a, b) => a.key.localeCompare(b.key));
+    }
+
+    // 2) Fallback: snapshot `monthly_stats` (preserva histórico mesmo após resetar transações).
+    let msQuery = supabase
+      .from('monthly_stats')
+      .select('year, month, church_id, total_amount, transaction_count');
+    if (hasFilter) {
+      msQuery = msQuery.in('church_id', filterIds!);
+    }
+    const { data, error } = await msQuery;
+    if (error) throw error;
+
+    const bucket = new Map<string, { year: number; month: number; amount: number; count: number }>();
+    (data ?? []).forEach((row: any) => {
+      const y = Number(row.year);
+      const m = Number(row.month);
+      const key = `${y}-${String(m).padStart(2, '0')}`;
+      const cur = bucket.get(key);
+      const amount = Number(row.total_amount) || 0;
+      const count = Number(row.transaction_count) || 0;
+      if (cur) {
+        cur.amount += amount;
+        cur.count += count;
+      } else {
+        bucket.set(key, { year: y, month: m, amount, count });
+      }
+    });
+
+    return Array.from(bucket.entries())
+      .map(([key, v]) => ({
+        key,
+        label: `${String(v.month).padStart(2, '0')}/${v.year}`,
+        amount: v.amount,
+        count: v.count,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  },
+
+  async getChurchesWithData(): Promise<ChurchWithData[]> {
+    // Retorna TODAS as igrejas cadastradas (as 66 do CHURCH_MAPPING), não apenas as que já têm dados.
+    // Igrejas sem transações exibem o gráfico com os 12 meses zerados.
+    const { data: churches, error } = await supabase
+      .from('churches')
+      .select('id, name');
+
+    if (error) throw error;
+
+    return ((churches ?? []) as Array<{ id: number; name: string }>)
+      .map((c) => ({ id: c.id, name: c.name }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  },
 };
 
 // ==================== STATS ====================
@@ -324,7 +536,15 @@ export const statsService = {
       topChurches,
       dailyVolume,
     };
-  }
+  },
+
+  async getMonthlyEvolution(churchId?: number | number[]): Promise<MonthlyEvolutionPoint[]> {
+    return monthlyStatsService.getEvolution(churchId);
+  },
+
+  async getChurchesWithMonthlyData(): Promise<ChurchWithData[]> {
+    return monthlyStatsService.getChurchesWithData();
+  },
 };
 
 // ==================== FILE PARSER ====================
@@ -960,6 +1180,18 @@ export const fileParserService = {
     // Bulk insert transactions
     if (transactionsToInsert.length > 0) {
       await transactionService.bulkCreate(transactionsToInsert);
+
+      // Alimenta o snapshot mensal apenas com as transações efetivamente
+      // inseridas (não duplicadas). Falhas aqui não derrubam o upload.
+      try {
+        const increments = groupTransactionsByMonth(transactionsToInsert);
+        if (increments.length > 0) {
+          await monthlyStatsService.applyIncrement(increments);
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[monthly_stats] applyIncrement falhou:', err);
+      }
     }
 
     // Update upload log
@@ -1004,6 +1236,8 @@ const supabaseApi = {
   
   // Stats
   getStats: statsService.getDashboardStats,
+  getMonthlyEvolution: statsService.getMonthlyEvolution,
+  getChurchesWithMonthlyData: statsService.getChurchesWithMonthlyData,
 
   // File upload
   uploadExtract: async (file: File, userId: string) => {

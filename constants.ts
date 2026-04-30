@@ -2,7 +2,7 @@ import { Church } from './types';
 
 // Based on the provided PDF mapping
 export const CHURCH_MAPPING: Record<number, string> = {
-  0: "Não identificado (Central)",
+  0: "CENTRAL - BRASIL",
   1: "CENTRAL - BRASIL",
   2: "PATAGÔNIA",
   3: "ALTO MARON - PARQUE SANTA CECÍLIA",

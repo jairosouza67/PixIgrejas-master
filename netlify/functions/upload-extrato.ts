@@ -25,7 +25,7 @@ const generateHash = (transaction: { date: Date; amount: number; description: st
   return crypto.createHash('md5').update(normalized).digest('hex');
 };
 
-const loadChurchMap = async (supabase: ReturnType<typeof createClient>) => {
+const loadChurchMap = async (supabase: any) => {
   const { data, error } = await supabase
     .from('churches')
     .select('id, cents_code');
@@ -55,6 +55,77 @@ const identifyChurchId = (churchMap: Map<number, number>, amount: number) => {
   }
 
   return 1;
+};
+
+/**
+ * Atualiza a tabela monthly_stats somando os incrementos das transações
+ * recém-inseridas. Agrupa por (year, month, church_id) e faz upsert com
+ * os valores acumulados (existentes + delta).
+ */
+const applyMonthlyStatsIncrement = async (
+  supabase: any,
+  insertedTransactions: Array<{ date: string; amount: number; church_id: number }>,
+) => {
+  if (!insertedTransactions.length) return;
+
+  type Delta = { year: number; month: number; church_id: number; amount: number; count: number };
+  const map = new Map<string, Delta>();
+
+  for (const tx of insertedTransactions) {
+    const d = new Date(tx.date);
+    if (Number.isNaN(d.getTime())) continue;
+    const year = d.getUTCFullYear();
+    const month = d.getUTCMonth() + 1;
+    const key = `${year}-${month}-${tx.church_id}`;
+    const cur = map.get(key);
+    if (cur) {
+      cur.amount += Number(tx.amount);
+      cur.count += 1;
+    } else {
+      map.set(key, { year, month, church_id: tx.church_id, amount: Number(tx.amount), count: 1 });
+    }
+  }
+
+  const deltas = Array.from(map.values());
+  if (!deltas.length) return;
+
+  // Busca linhas existentes para somar os deltas
+  const existingByKey = new Map<string, { total_amount: number; transaction_count: number }>();
+  for (const d of deltas) {
+    const { data, error } = await supabase
+      .from('monthly_stats')
+      .select('total_amount, transaction_count')
+      .eq('year', d.year)
+      .eq('month', d.month)
+      .eq('church_id', d.church_id)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) {
+      existingByKey.set(`${d.year}-${d.month}-${d.church_id}`, {
+        total_amount: Number((data as any).total_amount) || 0,
+        transaction_count: Number((data as any).transaction_count) || 0,
+      });
+    }
+  }
+
+  const rows = deltas.map((d) => {
+    const key = `${d.year}-${d.month}-${d.church_id}`;
+    const existing = existingByKey.get(key);
+    return {
+      year: d.year,
+      month: d.month,
+      church_id: d.church_id,
+      total_amount: (existing?.total_amount ?? 0) + d.amount,
+      transaction_count: (existing?.transaction_count ?? 0) + d.count,
+      updated_at: new Date().toISOString(),
+    };
+  });
+
+  const { error: upsertError } = await supabase
+    .from('monthly_stats')
+    .upsert(rows, { onConflict: 'year,month,church_id' });
+
+  if (upsertError) throw upsertError;
 };
 
 const parseDate = (value: string) => {
@@ -213,6 +284,14 @@ const runUploadExtrato = async (event: any) => {
         .eq('id', uploadLog.id);
 
       return jsonResponse({ error: insertError.message }, 500);
+    }
+
+    // Alimenta snapshot mensal (monthly_stats) com base nas transações
+    // recém-inseridas. Falha aqui é logada mas não interrompe o upload.
+    try {
+      await applyMonthlyStatsIncrement(supabase, normalizedTransactions);
+    } catch (err: any) {
+      console.warn('[monthly_stats] applyIncrement falhou:', err?.message || err);
     }
   }
 

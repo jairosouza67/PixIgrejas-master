@@ -1,4 +1,4 @@
-import { Transaction, DashboardStats, User, UserRole, Church } from '../types';
+import { Transaction, DashboardStats, User, UserRole, Church, MonthlyEvolutionPoint, ChurchWithData } from '../types';
 import { CHURCHES, CHURCH_MAPPING } from '../constants';
 
 // Simulating Backend Logic in Frontend for Demo Purposes
@@ -116,6 +116,63 @@ export const api = {
         const total = newTxs.reduce((acc, t) => acc + t.amount, 0);
         resolve({ processed: 15, duplicates: 0, totalAmount: total });
       }, 1500);
+    });
+  },
+
+  getMonthlyEvolution: async (
+    churchIdParam?: number | number[],
+  ): Promise<MonthlyEvolutionPoint[]> => {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        const filterIds: number[] | undefined = Array.isArray(churchIdParam)
+          ? churchIdParam
+          : typeof churchIdParam === 'number'
+            ? [churchIdParam]
+            : undefined;
+
+        const bucket = new Map<string, { year: number; month: number; amount: number; count: number }>();
+        const filtered = filterIds && filterIds.length > 0
+          ? storeTransactions.filter((t) => filterIds.includes(t.churchId))
+          : storeTransactions;
+
+        for (const tx of filtered) {
+          const d = new Date(tx.date);
+          if (isNaN(d.getTime())) continue;
+          const year = d.getUTCFullYear();
+          const month = d.getUTCMonth() + 1;
+          const key = `${year}-${String(month).padStart(2, '0')}`;
+          const cur = bucket.get(key);
+          if (cur) {
+            cur.amount += tx.amount;
+            cur.count += 1;
+          } else {
+            bucket.set(key, { year, month, amount: tx.amount, count: 1 });
+          }
+        }
+
+        const points: MonthlyEvolutionPoint[] = Array.from(bucket.entries())
+          .map(([key, v]) => ({
+            key,
+            label: `${String(v.month).padStart(2, '0')}/${v.year}`,
+            amount: v.amount,
+            count: v.count,
+          }))
+          .sort((a, b) => a.key.localeCompare(b.key));
+
+        resolve(points);
+      }, 200);
+    });
+  },
+
+  getChurchesWithMonthlyData: async (): Promise<ChurchWithData[]> => {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        // Retorna TODAS as igrejas cadastradas (as 66 do CHURCH_MAPPING).
+        const list: ChurchWithData[] = Object.entries(CHURCH_MAPPING)
+          .map(([id, name]) => ({ id: Number(id), name }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+        resolve(list);
+      }, 200);
     });
   }
 };
