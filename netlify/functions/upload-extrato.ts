@@ -5,6 +5,7 @@ type ParsedTransactionInput = {
   date: string;
   amount: number;
   description: string;
+  externalId?: string;
 };
 
 type UploadRequestBody = {
@@ -19,8 +20,8 @@ const jsonResponse = (body: unknown, statusCode: number) => ({
   body: JSON.stringify(body),
 });
 
-const generateHash = (transaction: { date: Date; amount: number; description: string }) => {
-  const normalized = `${transaction.date.toISOString()}|${transaction.amount.toFixed(2)}|${transaction.description.trim()}`;
+const generateHash = (transaction: { date: Date; amount: number; description: string; externalId: string }) => {
+  const normalized = `${transaction.date.toISOString()}|${transaction.amount.toFixed(2)}|${transaction.description.trim()}|${transaction.externalId}`;
   return crypto.createHash('md5').update(normalized).digest('hex');
 };
 
@@ -42,7 +43,8 @@ const loadChurchMap = async (supabase: ReturnType<typeof createClient>) => {
 };
 
 const identifyChurchId = (churchMap: Map<number, number>, amount: number) => {
-  const cents = Math.round((amount % 1) * 100);
+  // Usa valor absoluto para extrair centavos corretamente de valores negativos.
+  const cents = Math.round((Math.abs(amount) % 1) * 100);
 
   if (churchMap.has(cents)) {
     return churchMap.get(cents)!;
@@ -125,10 +127,11 @@ const runUploadExtrato = async (event: any) => {
     return jsonResponse({ error: 'Forbidden' }, 403);
   }
 
-  const parsedTransactions = transactions.map((transaction) => ({
+  const parsedTransactions = transactions.map((transaction, index) => ({
     date: parseDate(transaction.date),
     amount: Number(transaction.amount),
     description: String(transaction.description || '').trim(),
+    externalId: String(transaction.externalId || `row-${index}`).trim(),
   }));
 
   const { data: uploadLog, error: uploadLogError } = await supabase

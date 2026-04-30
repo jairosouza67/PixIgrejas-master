@@ -277,7 +277,19 @@ const UploadPage: React.FC<{ user: User }> = ({ user }) => {
   const [dragging, setDragging] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [processing, setProcessing] = useState(false);
-  const [result, setResult] = useState<{ processed: number; duplicates: number; totalAmount: number } | null>(null);
+  const [result, setResult] = useState<{
+    processed: number;
+    duplicates: number;
+    totalAmount: number;
+    discarded?: number;
+    discardStats?: {
+      noDate: number;
+      noAmount: number;
+      sentPix: number;
+      metadataRow: number;
+      tooFewColumns: number;
+    };
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleDrop = (e: React.DragEvent) => {
@@ -384,8 +396,23 @@ const UploadPage: React.FC<{ user: User }> = ({ user }) => {
             <p className="text-slate-500 mt-2">
               <strong className="text-slate-800">{result.processed}</strong> transações foram processadas e associadas às igrejas.<br/>
               {result.duplicates > 0 && <><strong className="text-amber-600">{result.duplicates}</strong> duplicadas foram ignoradas.<br/></>}
+              {result.discarded !== undefined && result.discarded > 0 && (
+                <><strong className="text-amber-600">{result.discarded}</strong> linhas descartadas durante a leitura.<br/></>
+              )}
               Valor total processado: <strong className="text-slate-800">R$ {result.totalAmount.toFixed(2)}</strong>.
             </p>
+            {result.discardStats && result.discarded !== undefined && result.discarded > 0 && (
+              <div className="mt-4 text-left text-xs text-slate-600 bg-amber-50 border border-amber-200 rounded-lg p-4 inline-block">
+                <p className="font-semibold text-amber-700 mb-2">Detalhe das linhas descartadas:</p>
+                <ul className="space-y-1">
+                  {result.discardStats.noDate > 0 && <li>• Sem data válida: <strong>{result.discardStats.noDate}</strong></li>}
+                  {result.discardStats.noAmount > 0 && <li>• Sem valor válido / valor não positivo: <strong>{result.discardStats.noAmount}</strong></li>}
+                  {result.discardStats.sentPix > 0 && <li>• Marcadas como PIX ENVIADO: <strong>{result.discardStats.sentPix}</strong></li>}
+                  {result.discardStats.metadataRow > 0 && <li>• Linhas de metadado (cliente/conta/extrato): <strong>{result.discardStats.metadataRow}</strong></li>}
+                  {result.discardStats.tooFewColumns > 0 && <li>• Poucas colunas: <strong>{result.discardStats.tooFewColumns}</strong></li>}
+                </ul>
+              </div>
+            )}
             <p className="text-sm text-blue-600 mt-4 bg-blue-50 py-2 px-4 rounded-lg inline-block">
               Os dados foram salvos no banco de dados com sucesso.
             </p>

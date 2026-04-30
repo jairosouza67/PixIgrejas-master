@@ -333,7 +333,26 @@ interface ParsedTransaction {
   date: Date;
   amount: number;
   description: string;
+  // Identificador anônimo por linha (hash curto do remetente bruto + índice),
+  // usado apenas para deduplicação – NÃO expõe dados pessoais.
+  externalId: string;
 }
+
+export interface DiscardStats {
+  noDate: number;
+  noAmount: number;
+  sentPix: number;
+  metadataRow: number;
+  tooFewColumns: number;
+}
+
+const createEmptyDiscardStats = (): DiscardStats => ({
+  noDate: 0,
+  noAmount: 0,
+  sentPix: 0,
+  metadataRow: 0,
+  tooFewColumns: 0,
+});
 
 // Build a safe, generic description that não expõe nome do doador
 const buildSafeDescription = (_raw?: string): string => {
@@ -341,9 +360,26 @@ const buildSafeDescription = (_raw?: string): string => {
   return 'PIX RECEBIDO';
 };
 
+// Hash curto (djb2) para uso como identificador anônimo não reversível
+const shortHash = (value: string): string => {
+  let hash = 5381;
+  for (let i = 0; i < value.length; i++) {
+    hash = ((hash << 5) + hash) + value.charCodeAt(i);
+    hash = hash & 0xffffffff;
+  }
+  return Math.abs(hash).toString(16).padStart(8, '0');
+};
+
+// Gera externalId anônimo combinando remetente bruto + índice da linha.
+// O índice garante unicidade mesmo quando remetente repete.
+const buildExternalId = (rawIdentifier: string, rowIndex: number): string => {
+  const normalized = (rawIdentifier || '').trim().toUpperCase();
+  return `${shortHash(normalized)}-${rowIndex}`;
+};
+
 // Generate hash for deduplication
 const generateHash = (tx: ParsedTransaction): string => {
-  const str = `${tx.date.toISOString()}|${tx.amount.toFixed(2)}|${tx.description.trim()}`;
+  const str = `${tx.date.toISOString()}|${tx.amount.toFixed(2)}|${tx.description.trim()}|${tx.externalId}`;
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
@@ -357,8 +393,9 @@ const generateHash = (tx: ParsedTransaction): string => {
 // Uses cached map for performance
 // Example: 100.15 -> cents=15, 100.66 -> cents=66, 100.00 -> cents=0
 const identifyChurchId = async (amount: number): Promise<number> => {
-  // Extract cents more reliably by converting to string
-  const amountStr = amount.toFixed(2); // Ensures 2 decimal places
+  // Extract cents more reliably by converting to string (usa valor absoluto para
+  // lidar corretamente com valores negativos).
+  const amountStr = Math.abs(amount).toFixed(2); // Ensures 2 decimal places
   const parts = amountStr.split('.');
   const cents = parseInt(parts[1] || '0', 10);
   
@@ -384,12 +421,26 @@ const identifyChurchId = async (amount: number): Promise<number> => {
   }
 };
 
-// Parse Brazilian date formats (DD/MM/YYYY, DD-MM-YYYY, etc)
-const parseDate = (dateStr: string): Date | null => {
+// Parse Brazilian date formats (DD/MM/YYYY, DD-MM-YYYY, etc).
+// Aceita opcionalmente uma string de hora (HH:MM ou HH:MM:SS) a ser aplicada à data.
+const parseDate = (dateStr: string, timeStr?: string): Date | null => {
   if (!dateStr) return null;
-  
+
   const cleaned = dateStr.toString().trim().replace(/"/g, '');
-  
+
+  // Extrai hora opcional (HH:MM ou HH:MM:SS)
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  if (timeStr) {
+    const timeMatch = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    if (timeMatch) {
+      hour = parseInt(timeMatch[1], 10) || 0;
+      minute = parseInt(timeMatch[2], 10) || 0;
+      second = timeMatch[3] ? parseInt(timeMatch[3], 10) || 0 : 0;
+    }
+  }
+
   // Try DD/MM/YYYY or DD-MM-YYYY (Brazilian format)
   const brMatch = cleaned.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (brMatch) {
@@ -397,33 +448,39 @@ const parseDate = (dateStr: string): Date | null => {
     const month = parseInt(brMatch[2]) - 1;
     let year = parseInt(brMatch[3]);
     if (year < 100) year += 2000;
-    const date = new Date(year, month, day);
+    const date = new Date(year, month, day, hour, minute, second);
     if (!isNaN(date.getTime())) return date;
   }
-  
+
   // Try YYYY-MM-DD (ISO format)
   const isoMatch = cleaned.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
   if (isoMatch) {
-    const date = new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]));
+    const date = new Date(parseInt(isoMatch[1]), parseInt(isoMatch[2]) - 1, parseInt(isoMatch[3]), hour, minute, second);
     if (!isNaN(date.getTime())) return date;
   }
-  
+
   // Try standard Date parsing
   const date = new Date(cleaned);
-  if (!isNaN(date.getTime())) return date;
-  
+  if (!isNaN(date.getTime())) {
+    if (timeStr) {
+      date.setHours(hour, minute, second, 0);
+    }
+    return date;
+  }
+
   return null;
 };
 
-// Parse amount from various formats
+// Parse amount from various formats. Retorna qualquer número válido (inclusive 0 e negativos).
 const parseAmount = (amountStr: string | number): number | null => {
   if (typeof amountStr === 'number') {
-    return amountStr > 0 ? amountStr : null;
+    return Number.isFinite(amountStr) ? amountStr : null;
   }
   
-  if (!amountStr) return null;
+  if (amountStr === null || amountStr === undefined) return null;
   
   let cleaned = amountStr.toString().trim().replace(/"/g, '');
+  if (!cleaned) return null;
   
   // Remove currency symbols and spaces
   cleaned = cleaned.replace(/R\$|\$|BRL/gi, '').trim();
@@ -447,7 +504,7 @@ const parseAmount = (amountStr: string | number): number | null => {
   }
   
   const amount = parseFloat(cleaned);
-  return !isNaN(amount) && amount > 0 ? amount : null;
+  return Number.isFinite(amount) ? amount : null;
 };
 
 const splitCsvLine = (line: string, separator: string): string[] => {
@@ -485,14 +542,22 @@ const splitCsvLine = (line: string, separator: string): string[] => {
 const uploadParsedTransactionsViaNetlify = async (
   filename: string,
   userId: string,
-  transactions: ParsedTransaction[]
-): Promise<{ processed: number; duplicates: number; totalAmount: number } | null> => {
+  transactions: ParsedTransaction[],
+  discardStats: DiscardStats,
+): Promise<{ processed: number; duplicates: number; totalAmount: number; discarded: number; discardStats: DiscardStats } | null> => {
   const { data: sessionData } = await supabase.auth.getSession();
   const accessToken = sessionData.session?.access_token;
 
   if (!accessToken) {
     return null;
   }
+
+  const payloadTransactions = transactions.map((tx) => ({
+    date: tx.date.toISOString(),
+    amount: tx.amount,
+    description: tx.description,
+    externalId: tx.externalId,
+  }));
 
   const response = await fetch('/.netlify/functions/upload-extrato', {
     method: 'POST',
@@ -503,7 +568,7 @@ const uploadParsedTransactionsViaNetlify = async (
     body: JSON.stringify({
       filename,
       userId,
-      transactions,
+      transactions: payloadTransactions,
     }),
   });
 
@@ -513,20 +578,31 @@ const uploadParsedTransactionsViaNetlify = async (
     throw new Error(payload?.error || 'Falha ao enviar o extrato para o processamento online');
   }
 
-  return payload as { processed: number; duplicates: number; totalAmount: number };
+  const discardedTotal =
+    discardStats.noDate +
+    discardStats.noAmount +
+    discardStats.sentPix +
+    discardStats.metadataRow +
+    discardStats.tooFewColumns;
+
+  return {
+    ...(payload as { processed: number; duplicates: number; totalAmount: number }),
+    discarded: discardedTotal,
+    discardStats,
+  };
 };
 
 export const fileParserService = {
-  async parseCSV(content: string): Promise<ParsedTransaction[]> {
+  async parseCSV(content: string, discardStats?: DiscardStats): Promise<ParsedTransaction[]> {
     const lines = content.trim().split(/\r?\n/);
     const transactions: ParsedTransaction[] = [];
+    const stats = discardStats ?? createEmptyDiscardStats();
 
     if (lines.length < 2) {
       return transactions;
     }
 
     // Detect separator (try tab, semicolon, then comma)
-    const firstDataLine = lines.find(l => l.trim() && !l.toLowerCase().includes('cliente') && !l.toLowerCase().includes('conta'));
     const firstLine = lines[0];
     let separator = '\t';
     if (!firstLine.includes('\t')) {
@@ -539,6 +615,9 @@ export const fileParserService = {
     // Find column indexes - support Caixa PIX format
     const dateIdx = headers.findIndex(h => 
       h === 'data' || h.includes('data') || h.includes('date') || h.includes('dt')
+    );
+    const timeIdx = headers.findIndex(h =>
+      h === 'hora' || h.includes('hora') || h.includes('time')
     );
     const descIdx = headers.findIndex(h => 
       h.includes('remetente') || h.includes('destinat') || h.includes('descri') || h.includes('histor') || h.includes('nome') || h.includes('pagador')
@@ -556,44 +635,51 @@ export const fileParserService = {
       const line = lines[i].trim();
       if (!line) continue;
       
-      // Skip header rows that might appear in the middle (Caixa format has metadata rows)
-      if (line.toLowerCase().includes('cliente') || line.toLowerCase().includes('conta') || line.toLowerCase().includes('extrato')) {
-        continue;
-      }
+      // NOTA: não descartamos mais linhas por palavras-chave tipo "cliente/conta/extrato"
+      // porque isso pode afetar transações legítimas cujo remetente contenha essas
+      // palavras. Linhas de metadado sem data/valor serão naturalmente filtradas
+      // pelas validações abaixo.
 
       const parts = splitCsvLine(line, separator);
       
       // Skip if not enough columns
-      if (parts.length < 3) continue;
-      
-      // For Caixa format: only process "RECEBIDO" or positive value transactions
-      // Skip only if explicitly marked as "ENVIADO" (sent)
-      if (tipoPixIdx >= 0) {
-        const tipoPix = parts[tipoPixIdx]?.toUpperCase() || '';
-        if (tipoPix === 'ENVIADO') {
-          continue;
-        }
+      if (parts.length < 3) {
+        stats.tooFewColumns++;
+        continue;
       }
+      
+      // NOTA: filtro "ENVIADO" removido intencionalmente — importamos todas as
+      // transações sem descarte por tipo de PIX.
       
       // Use detected columns or fallback to positional
       const dateStr = dateIdx >= 0 ? parts[dateIdx] : parts[0];
+      const timeStr = timeIdx >= 0 ? parts[timeIdx] : undefined;
       const rawDescription = descIdx >= 0 ? parts[descIdx] : (parts[4] || parts[1] || 'PIX');
       // For Caixa: valor is usually the last column
       const amountStr = amountIdx >= 0 ? parts[amountIdx] : parts[parts.length - 1];
       
-      const date = parseDate(dateStr);
+      const date = parseDate(dateStr, timeStr);
       const amount = parseAmount(amountStr);
       
-      if (date && amount && amount > 0) {
-        const description = buildSafeDescription(rawDescription);
-        transactions.push({ date, amount, description });
+      if (!date) {
+        stats.noDate++;
+        continue;
       }
+      // Aceita qualquer valor numérico válido (inclusive zero e negativos)
+      if (amount === null || Number.isNaN(amount)) {
+        stats.noAmount++;
+        continue;
+      }
+
+      const description = buildSafeDescription(rawDescription);
+      const externalId = buildExternalId(rawDescription, i);
+      transactions.push({ date, amount, description, externalId });
     }
 
     return transactions;
   },
 
-  async parseXLSX(buffer: ArrayBuffer): Promise<ParsedTransaction[]> {
+  async parseXLSX(buffer: ArrayBuffer, discardStats?: DiscardStats): Promise<ParsedTransaction[]> {
     const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
     
@@ -621,13 +707,17 @@ export const fileParserService = {
     });
 
     const transactions: ParsedTransaction[] = [];
+    const stats = discardStats ?? createEmptyDiscardStats();
+    let rowCounter = 0;
 
     for (const row of data) {
+      rowCounter++;
       const keys = Object.keys(row);
       const values = Object.values(row);
       
       // Try to find columns by name patterns - Caixa PIX format
       let dateValue: any = null;
+      let timeValue: any = null;
       let descValue: any = null;
       let amountValue: any = null;
       let tipoPix: string = '';
@@ -638,6 +728,11 @@ export const fileParserService = {
         // Date column
         if (!dateValue && (keyLower === 'data' || keyLower.startsWith('data'))) {
           dateValue = row[key];
+        }
+
+        // Hora column
+        if (!timeValue && (keyLower === 'hora' || keyLower.startsWith('hora') || keyLower.includes('time'))) {
+          timeValue = row[key];
         }
         
         // Description - Remetente/Destinatário for Caixa
@@ -661,14 +756,13 @@ export const fileParserService = {
         }
       }
       
-      // Skip only if explicitly marked as "ENVIADO" (sent), not all non-RECEBIDO
-      if (tipoPix === 'ENVIADO') {
-        continue;
-      }
+      // NOTA: filtro "ENVIADO" removido intencionalmente — importamos todas as
+      // transações sem descarte por tipo de PIX.
       
       // Fallback: if no named columns found, use positional (Caixa format)
       // Caixa format: Data | Hora | Tipo de Pix | Situação | Remetente/Destinatário | Valor
       if (!dateValue) dateValue = values[0];
+      if (!timeValue) timeValue = values[1];
       if (!descValue) descValue = values[4] || values[1] || 'PIX RECEBIDO';
       if (!amountValue) amountValue = values[5] || values[values.length - 1];
 
@@ -678,21 +772,44 @@ export const fileParserService = {
       if (typeof dateValue === 'number') {
         date = new Date((dateValue - 25569) * 86400 * 1000);
       } else if (dateValue instanceof Date) {
-        date = dateValue;
+        date = new Date(dateValue.getTime());
       } else {
-        date = parseDate(String(dateValue));
+        date = parseDate(String(dateValue), timeValue ? String(timeValue) : undefined);
+      }
+
+      // Se recebemos data sem hora e há coluna de hora separada, aplica
+      if (date && timeValue && (typeof dateValue === 'number' || dateValue instanceof Date)) {
+        const timeMatch = String(timeValue).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+        if (timeMatch) {
+          date.setHours(
+            parseInt(timeMatch[1], 10) || 0,
+            parseInt(timeMatch[2], 10) || 0,
+            timeMatch[3] ? parseInt(timeMatch[3], 10) || 0 : 0,
+            0,
+          );
+        }
       }
       
       const amount = parseAmount(amountValue);
 
-      if (date && amount && amount > 0) {
-        const description = buildSafeDescription(String(descValue));
-        transactions.push({
-          date,
-          amount,
-          description,
-        });
+      if (!date || isNaN(date.getTime())) {
+        stats.noDate++;
+        continue;
       }
+      // Aceita qualquer valor numérico válido (inclusive zero e negativos)
+      if (amount === null || Number.isNaN(amount)) {
+        stats.noAmount++;
+        continue;
+      }
+
+      const description = buildSafeDescription(String(descValue));
+      const externalId = buildExternalId(String(descValue), rowCounter);
+      transactions.push({
+        date,
+        amount,
+        description,
+        externalId,
+      });
     }
 
     return transactions;
@@ -704,8 +821,10 @@ export const fileParserService = {
     // Handle both XML-style and SGML-style OFX
     const stmtTrnRegex = /<STMTTRN>([\s\S]*?)(<\/STMTTRN>|(?=<STMTTRN>)|(?=<\/BANKTRANLIST>))/gi;
     let match;
+    let rowCounter = 0;
 
     while ((match = stmtTrnRegex.exec(content)) !== null) {
+      rowCounter++;
       const trn = match[1];
       
       // Try different date formats in OFX
@@ -713,23 +832,30 @@ export const fileParserService = {
       const trnAmt = trn.match(/<TRNAMT>([+-]?[\d.,]+)/)?.[1];
       const memo = trn.match(/<MEMO>([^<\r\n]*)/)?.[1]?.trim() || '';
       const name = trn.match(/<NAME>([^<\r\n]*)/)?.[1]?.trim() || '';
-      const trnType = trn.match(/<TRNTYPE>([^<\r\n]*)/)?.[1]?.trim() || '';
+      const fitid = trn.match(/<FITID>([^<\r\n]*)/)?.[1]?.trim() || '';
 
       if (dtPosted && trnAmt) {
         const year = parseInt(dtPosted.substring(0, 4));
         const month = parseInt(dtPosted.substring(4, 6)) - 1;
         const day = parseInt(dtPosted.substring(6, 8));
+        // OFX pode ter hora embutida (YYYYMMDDHHMMSS)
+        const hour = dtPosted.length >= 10 ? parseInt(dtPosted.substring(8, 10)) || 0 : 0;
+        const minute = dtPosted.length >= 12 ? parseInt(dtPosted.substring(10, 12)) || 0 : 0;
+        const second = dtPosted.length >= 14 ? parseInt(dtPosted.substring(12, 14)) || 0 : 0;
         
-        const date = new Date(year, month, day);
+        const date = new Date(year, month, day, hour, minute, second);
         const amount = parseFloat(trnAmt.replace(',', '.'));
 
-        // Accept positive amounts (credits) - most important is positive value
-        if (!isNaN(date.getTime()) && !isNaN(amount) && amount > 0) {
+        // Aceita qualquer valor numérico válido (inclusive zero e negativos).
+        if (!isNaN(date.getTime()) && Number.isFinite(amount)) {
           const description = buildSafeDescription(memo || name);
+          const rawId = fitid || memo || name;
+          const externalId = buildExternalId(rawId, rowCounter);
           transactions.push({
             date,
             amount,
             description,
+            externalId,
           });
         }
       }
@@ -738,17 +864,18 @@ export const fileParserService = {
     return transactions;
   },
 
-  async processFile(file: File, userId: string): Promise<{ processed: number; duplicates: number; totalAmount: number }> {
+  async processFile(file: File, userId: string): Promise<{ processed: number; duplicates: number; totalAmount: number; discarded: number; discardStats: DiscardStats }> {
     let parsedTransactions: ParsedTransaction[] = [];
     const filename = file.name.toLowerCase();
+    const discardStats = createEmptyDiscardStats();
 
     try {
       if (filename.endsWith('.csv') || filename.endsWith('.txt')) {
         const content = await file.text();
-        parsedTransactions = await this.parseCSV(content);
+        parsedTransactions = await this.parseCSV(content, discardStats);
       } else if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
         const buffer = await file.arrayBuffer();
-        parsedTransactions = await this.parseXLSX(buffer);
+        parsedTransactions = await this.parseXLSX(buffer, discardStats);
       } else if (filename.endsWith('.ofx') || filename.endsWith('.qfx')) {
         const content = await file.text();
         parsedTransactions = await this.parseOFX(content);
@@ -763,7 +890,14 @@ export const fileParserService = {
       throw new Error('Nenhuma transação válida encontrada no arquivo. Verifique se o arquivo contém transações com data, descrição e valor positivo.');
     }
 
-    const remoteResult = await uploadParsedTransactionsViaNetlify(file.name, userId, parsedTransactions);
+    const discardedTotal =
+      discardStats.noDate +
+      discardStats.noAmount +
+      discardStats.sentPix +
+      discardStats.metadataRow +
+      discardStats.tooFewColumns;
+
+    const remoteResult = await uploadParsedTransactionsViaNetlify(file.name, userId, parsedTransactions, discardStats);
     if (remoteResult) {
       return remoteResult;
     }
@@ -845,6 +979,8 @@ export const fileParserService = {
       processed: transactionsToInsert.length,
       duplicates,
       totalAmount,
+      discarded: discardedTotal,
+      discardStats,
     };
   }
 };
