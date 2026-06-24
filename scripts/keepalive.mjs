@@ -62,6 +62,8 @@ async function keepalive() {
     return true;
   } catch (err) {
     console.error(`❌ Falhou após ${Date.now() - startTime}ms: ${err.message}`);
+    if (err.cause) console.error(`Detalhes (cause):`, err.cause);
+    console.error(`Dica: Verifique se a SUPABASE_URL está correta, começa com https:// e se o projeto NÃO está pausado no Supabase.`);
     return false;
   }
 }
